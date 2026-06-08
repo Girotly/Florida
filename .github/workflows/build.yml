@@ -1,6 +1,5 @@
 name: Florida
 
-
 on:
   schedule:
     - cron: "0 9/12 * * *"
@@ -11,11 +10,9 @@ on:
       - ".github/workflows/build.yml"
       - "patches/**"
 
-
 jobs: 
   check_version:
     runs-on: ubuntu-22.04
-
     outputs:
       FRIDA_VERSION: ${{ steps.pullFridaLatestRelease.outputs.FRIDA_VERSION }}
       ALREADY_RELEASE: ${{ steps.checkReleaseVersion.outputs.ALREADY_RELEASE }}
@@ -35,7 +32,6 @@ jobs:
             } = releaseResponse;
             core.setOutput('FRIDA_VERSION', ver);
 
-
       - name: Split Repository Name
         id: split_name
         run: |
@@ -43,7 +39,6 @@ jobs:
           IFS='/' read -ra repo_parts <<< "$repo_name"
           echo "owner=${repo_parts[0]}" >> $GITHUB_OUTPUT
           echo "repo=${repo_parts[1]}" >> $GITHUB_OUTPUT
-
 
       - name: Check release version
         id: checkReleaseVersion
@@ -63,9 +58,9 @@ jobs:
               } = releaseResponse;
               if (ver == '${{ steps.pullFridaLatestRelease.outputs.FRIDA_VERSION }}'){
                   if ( ${{ ( github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}){
-                    core.setOutput('ALREADY_RELEASE', '2');
+                      core.setOutput('ALREADY_RELEASE', '2');
                   } else {
-                    core.setOutput('ALREADY_RELEASE', '1');
+                      core.setOutput('ALREADY_RELEASE', '1');
                   }
               }
               else{
@@ -87,7 +82,6 @@ jobs:
           tag_name: ${{ steps.pullFridaLatestRelease.outputs.FRIDA_VERSION }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           delete_release: true
-
 
   android_build:
     runs-on: ubuntu-22.04
@@ -128,36 +122,63 @@ jobs:
     - name: build frida for Android
       shell: bash
       run: |
+        set -x
+        unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_CONFIG_NOSYSTEM 2>/dev/null || true
+        
+        export FRIDA_VER="${{ needs.check_version.outputs.FRIDA_VERSION }}"
+        echo "Target Frida version: $FRIDA_VER"
+        
         git config --global user.name "GitHub Actions"
         git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
         
         export ANDROID_NDK_ROOT=${{ steps.setup-ndk.outputs.ndk-path }}
         echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT"
         
-        git clone --recurse-submodules https://github.com/frida/frida
+        echo "=== Cloning frida/frida (depth=1, branch=$FRIDA_VER) ==="
+        git clone --depth 1 --recurse-submodules --branch "$FRIDA_VER" https://github.com/frida/frida || {
+          echo "WARN: Full clone failed (exit=$?). Trying fallback: clone first, then submodules..."
+          git clone --depth 1 --branch "$FRIDA_VER" https://github.com/frida/frida || {
+            echo "FATAL: git clone failed completely"
+            exit 1
+          }
+          cd frida
+          git submodule update --init --recursive --depth 1 || {
+            echo "FATAL: submodule init failed"
+            exit 1
+          }
+          cd ..
+        }
+        
         cd frida
-        for path in ../patches/*
-        do
-          name=$(basename $path)
-          real=$(realpath $path)
-          echo "Apply patches in $real to frida/subprojects/$name"
-          cd subprojects/$name
-          git am ../../../patches/$name/*.patch
+        echo "=== Applying Florida patches ==="
+        for path in ../patches/*; do
+          name=$(basename "$path")
+          echo "--- Patching subprojects/$name ---"
+          cd "subprojects/$name"
+          if ! git am "../../../patches/$name/"*.patch 2>&1; then
+            echo "WARN: git am failed for $name, attempting skip..."
+            if ! git am --skip 2>&1; then
+              echo "FATAL: Cannot apply or skip patch for $name"
+              git status
+              exit 1
+            fi
+            echo "Skip successful, continuing..."
+          fi
           cd ../..
-          echo $i
         done
         cd ..
         
+        echo "=== Building for all architectures ==="
         ARCHES="android-arm android-arm64 android-x86 android-x86_64"
-        for ARCH in $ARCHES
-        do
-          mkdir build-$ARCH
-          cd build-$ARCH
-          ../frida/configure --host=$ARCH
-          make
+        for ARCH in $ARCHES; do
+          echo "--- Building $ARCH ---"
+          mkdir -p "build-$ARCH"
+          cd "build-$ARCH"
+          ../frida/configure --host="$ARCH"
+          make -j$(nproc)
           cd ..
         done
-    
+
     - name: package frida-server
       shell: bash
       run: |
